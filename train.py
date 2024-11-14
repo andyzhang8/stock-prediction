@@ -1,5 +1,3 @@
-# train.py
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,38 +9,37 @@ from lstm_model import LSTMModel
 
 # Parameters
 ticker = "AAPL"
-sequence_length = 200
+sequence_length = 250
 start_date = "2010-01-01"
 end_date = "2020-01-01"
-num_epochs = 100  # Increased epochs to allow more learning time
+num_epochs = 100
 batch_size = 64
-learning_rate = 0.0005  # Reduced learning rate for gradual adjustments
+learning_rate = 0.0001
 
-# Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def train_and_evaluate(data_loader, model, num_epochs, checkpoint_path):
+def train_and_evaluate(data_loader, model, num_epochs):
     x, y, scaler = data_loader.get_data()
     
-    # Split data into training and testing sets
     train_size = int(len(x) * 0.7)
     x_train, x_test = x[:train_size], x[train_size:]
     y_train, y_test = y[:train_size], y[train_size:]
     
-    # Convert numpy arrays to PyTorch tensors and move to device
     x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
     y_train = torch.tensor(y_train, dtype=torch.float32).to(device)
     x_test = torch.tensor(x_test, dtype=torch.float32).to(device)
     y_test = torch.tensor(y_test, dtype=torch.float32).to(device)
     
-    # Define loss, optimizer, and learning rate scheduler
+    # Loss, optimizer, and learning rate scheduler
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=15, verbose=True)  # Less aggressive factor and increased patience
-
-    early_stop_patience = 30  # Increased patience to allow more time for improvement
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+    
+    # Early stopping parameters
+    early_stop_patience = 50 
     best_val_loss = float("inf")
     patience_counter = 0
+    min_delta = 1e-4  # Minimum improvement threshold for early stopping
 
     for epoch in range(num_epochs):
         model.train()
@@ -77,11 +74,11 @@ def train_and_evaluate(data_loader, model, num_epochs, checkpoint_path):
         if (epoch + 1) % 10 == 0:
             print(f'Epoch [{epoch + 1}/{num_epochs}], Training Loss: {avg_epoch_loss:.4f}, Validation Loss: {val_loss:.4f}')
 
-        # Early stopping with increased patience
-        if val_loss < best_val_loss:
+        # Early stopping check
+        if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), checkpoint_path)
+            torch.save(model.state_dict(), "temp_best_model.pth")  # Save the best model during training
         else:
             patience_counter += 1
             if patience_counter >= early_stop_patience:
@@ -89,7 +86,7 @@ def train_and_evaluate(data_loader, model, num_epochs, checkpoint_path):
                 break
 
     # Load the best model for evaluation
-    model.load_state_dict(torch.load(checkpoint_path))
+    model.load_state_dict(torch.load("temp_best_model.pth"))
     model.eval()
     with torch.no_grad():
         predicted = model(x_test).squeeze().cpu().numpy()
@@ -97,10 +94,10 @@ def train_and_evaluate(data_loader, model, num_epochs, checkpoint_path):
 
     # Inverse transform to get actual prices
     predicted_prices = scaler.inverse_transform(
-        np.concatenate((predicted.reshape(-1, 1), np.zeros((len(predicted), 2))), axis=1)
+        np.concatenate((predicted.reshape(-1, 1), np.zeros((len(predicted), 7))), axis=1)
     )[:, 0]
     actual_prices = scaler.inverse_transform(
-        np.concatenate((actual.reshape(-1, 1), np.zeros((len(actual), 2))), axis=1)
+        np.concatenate((actual.reshape(-1, 1), np.zeros((len(actual), 7))), axis=1)
     )[:, 0]
 
     # Calculate evaluation metrics
@@ -115,7 +112,7 @@ def train_and_evaluate(data_loader, model, num_epochs, checkpoint_path):
     print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
     print(f"R-squared (R²): {r2:.4f}")
 
-    # Plot results
+    # Plot
     plt.figure(figsize=(12, 6))
     plt.plot(actual_prices, label='Actual Price')
     plt.plot(predicted_prices, label='Predicted Price')
@@ -127,15 +124,17 @@ def train_and_evaluate(data_loader, model, num_epochs, checkpoint_path):
     plt.savefig(f"prediction_plot_{data_loader.ticker}.png")
     plt.show()
 
-# Initialize model
-input_size = 3  # 'Close', 'MA100', 'MA200' columns
-model = LSTMModel(input_size=input_size, hidden_size=100, num_layers=4, dropout=0.3).to(device)
+
+input_size = 8  # 'Close', 'MA100', 'MA200', 'RSI', 'MACD', 'Signal Line', 'Upper Band', 'Lower Band'
+model = LSTMModel(input_size=input_size, hidden_size=200, num_layers=5, dropout=0.2).to(device)
 
 print("Training on yfinance data...")
 data_loader_yfinance = StockDataLoader(ticker=ticker, sequence_length=sequence_length, use_yfinance=True, start_date=start_date, end_date=end_date)
-train_and_evaluate(data_loader_yfinance, model, num_epochs, checkpoint_path="best_model_yfinance.pth")
+train_and_evaluate(data_loader_yfinance, model, num_epochs)
 
-# Load the model with yfinance training and continue training on local dataset
 print("Training on local dataset...")
 data_loader_local = StockDataLoader(ticker=ticker, sequence_length=sequence_length, data_dir="dataset", use_yfinance=False)
-train_and_evaluate(data_loader_local, model, num_epochs, checkpoint_path="best_model_local.pth")
+train_and_evaluate(data_loader_local, model, num_epochs)
+
+torch.save(model.state_dict(), "final_lstm_stock_prediction_model.pth")
+print("Final model saved as 'final_lstm_stock_prediction_model.pth'")

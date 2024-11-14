@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size=50, num_layers=4, dropout=0.2):
+    def __init__(self, input_size=8, hidden_size=256, num_layers=5, dropout=0.3):
         super(LSTMModel, self).__init__()
 
         self.hidden_size = hidden_size
@@ -15,18 +15,16 @@ class LSTMModel(nn.Module):
             dropout=dropout,
             batch_first=True
         )
-        
-        # Additional dropout after each LSTM layer for regularization
+
         self.dropout = nn.Dropout(dropout)
-        
-        # Fully connected output layer
+
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
 
-        # Forward propagate LSTM
+        # Forward propagate through LSTM layers
         out, _ = self.lstm(x, (h0, c0))
         out = self.dropout(out)  # Apply dropout
 

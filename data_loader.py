@@ -1,55 +1,64 @@
 import pandas as pd
 import numpy as np
 import os
-import yfinance as yf
 from sklearn.preprocessing import MinMaxScaler
 
 class StockDataLoader:
-    def __init__(self, ticker, sequence_length=100, data_dir="dataset", use_yfinance=False, start_date="2010-01-01", end_date=None):
+    def __init__(self, ticker, sequence_length=100, data_dir="dataset"):
         self.ticker = ticker
         self.sequence_length = sequence_length
-        self.data_dir = data_dir  # Directory containing the local dataset
-        self.use_yfinance = use_yfinance  # Determine whether to use yfinance
-        self.start_date = start_date
-        self.end_date = end_date
+        self.data_dir = data_dir
         self.scaler = MinMaxScaler(feature_range=(0, 1))
 
     def load_data(self):
-        if self.use_yfinance:
-            # Download data from yfinance
-            data = yf.download(self.ticker, start=self.start_date, end=self.end_date)
+        file_path_stocks = os.path.join(self.data_dir, 'stocks', f"{self.ticker}.csv")
+        file_path_etfs = os.path.join(self.data_dir, 'etfs', f"{self.ticker}.csv")
+
+        if os.path.exists(file_path_stocks):
+            file_path = file_path_stocks
+        elif os.path.exists(file_path_etfs):
+            file_path = file_path_etfs
         else:
-            # Define the path to look for the stock data in the stocks or ETFs folder
-            file_path_stocks = os.path.join(self.data_dir, 'stocks', f"{self.ticker}.csv")
-            file_path_etfs = os.path.join(self.data_dir, 'etfs', f"{self.ticker}.csv")
-            
-            # Check if file exists in stocks or ETFs folder
-            if os.path.exists(file_path_stocks):
-                file_path = file_path_stocks
-            elif os.path.exists(file_path_etfs):
-                file_path = file_path_etfs
-            else:
-                raise FileNotFoundError(f"No data found for ticker {self.ticker}")
+            raise FileNotFoundError(f"No data found for ticker {self.ticker}")
 
-            # Load the CSV file and ensure columns are interpreted as floats
-            data = pd.read_csv(file_path, dtype={
-                "Open": float, "High": float, "Low": float, 
-                "Close": float, "Adj Close": float, "Volume": float
-            })
+        data = pd.read_csv(file_path)
+        required_columns = ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+        if not all(column in data.columns for column in required_columns):
+            raise ValueError(f"CSV file for {self.ticker} is missing required columns")
 
-        # Verify that the required columns exist and are float types
-        required_columns = ["Close"]
-        for col in ["MA100", "MA200"]:
-            data[col] = data['Close'].rolling(window=int(col[2:])).mean()  # Moving averages
-        data.dropna(inplace=True)  # Drop rows with NaN values
+        data = data.sort_values(by="Date")
+        data['MA100'] = data['Close'].rolling(window=100).mean()
+        data['MA200'] = data['Close'].rolling(window=200).mean()
+        data['RSI'] = self.calculate_rsi(data['Close'])
+        data['MACD'], data['Signal Line'] = self.calculate_macd(data['Close'])
+        data['Upper Band'], data['Lower Band'] = self.calculate_bollinger_bands(data['Close'])
+        data.dropna(inplace=True)
 
-        return data[['Close', 'MA100', 'MA200']]
+        return data[['Close', 'MA100', 'MA200', 'RSI', 'MACD', 'Signal Line', 'Upper Band', 'Lower Band']]
+
+    def calculate_rsi(self, prices, period=14):
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    def calculate_macd(self, prices, fast_period=12, slow_period=26, signal_period=9):
+        exp1 = prices.ewm(span=fast_period, adjust=False).mean()
+        exp2 = prices.ewm(span=slow_period, adjust=False).mean()
+        macd = exp1 - exp2
+        signal_line = macd.ewm(span=signal_period, adjust=False).mean()
+        return macd, signal_line
+
+    def calculate_bollinger_bands(self, prices, window=20, num_std=2):
+        rolling_mean = prices.rolling(window=window).mean()
+        rolling_std = prices.rolling(window=window).std()
+        upper_band = rolling_mean + (rolling_std * num_std)
+        lower_band = rolling_mean - (rolling_std * num_std)
+        return upper_band, lower_band
 
     def preprocess_data(self, data):
-        # Scale the data
         data_scaled = self.scaler.fit_transform(data)
-
-        # Create sequences
         x, y = [], []
         for i in range(self.sequence_length, len(data_scaled)):
             x.append(data_scaled[i - self.sequence_length:i])
