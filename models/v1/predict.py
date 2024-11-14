@@ -4,12 +4,16 @@ import yfinance as yf
 import numpy as np
 import sys
 from sklearn.preprocessing import MinMaxScaler
-from lstm_model import LSTMModel
+from lstm_model import LSTMModel  # Import your LSTM model class
 
-MODEL_PATH = "final_lstm_stock_prediction_model.pth"
-SEQUENCE_LENGTH = 250
-INPUT_SIZE = 8  # 'Close', 'MA100', 'MA200', 'RSI', 'MACD', 'Signal Line', 'Upper Band', 'Lower Band'
+# Load model architecture and model weights
+MODEL_PATH = "best_model_yfinance.pth"
 
+# Define constants
+SEQUENCE_LENGTH = 200  # Same sequence length as in training
+INPUT_SIZE = 3  # Number of input features used in the model ('Close', 'MA100', 'MA200')
+
+# Define a function to load the model
 def load_model(input_size, hidden_size=200, num_layers=5, dropout=0.2):
     model = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
@@ -18,66 +22,57 @@ def load_model(input_size, hidden_size=200, num_layers=5, dropout=0.2):
 
 # Fetch data for the specified stock ticker
 def fetch_data(ticker, sequence_length=SEQUENCE_LENGTH):
-    periods = ["1y", "2y", "3y", "5y"]
+    # Try fetching a longer period if not enough data is found initially
+    periods = ["1y", "2y", "3y", "5y"]  # Try progressively longer periods
     data = None
+    
     for period in periods:
+        # Download historical data
         data = yf.download(ticker, period=period, interval="1d")
+        
+        # Calculate additional features: Moving averages
         data['MA100'] = data['Close'].rolling(window=100).mean()
         data['MA200'] = data['Close'].rolling(window=200).mean()
-        data['RSI'] = calculate_rsi(data['Close'])
-        data['MACD'], data['Signal Line'] = calculate_macd(data['Close'])
-        data['Upper Band'], data['Lower Band'] = calculate_bollinger_bands(data['Close'])
         data.dropna(inplace=True)
 
+        # Check if there's enough data after calculating moving averages
         if data.shape[0] >= sequence_length:
             print(f"Data fetched for {ticker} with period: {period}")
             break
         else:
             print(f"Not enough data with period {period}. Trying a longer period...")
 
+    # If we exit the loop and still don't have enough data, raise an error
     if data is None or data.shape[0] < sequence_length:
-        raise ValueError(f"Not enough data available for {ticker}. Try a longer period or a different stock.")
+        raise ValueError(f"Not enough data available for {ticker} after applying moving averages. Try an even longer period or a different stock.")
 
+    # Prepare data for model
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(data[['Close', 'MA100', 'MA200', 'RSI', 'MACD', 'Signal Line', 'Upper Band', 'Lower Band']])
+    scaled_data = scaler.fit_transform(data[['Close', 'MA100', 'MA200']])
 
-    x_input = scaled_data[-sequence_length:]
-    x_input = np.expand_dims(x_input, axis=0)
+    # Get the last sequence of data
+    x_input = scaled_data[-sequence_length:]  # Shape: (sequence_length, INPUT_SIZE)
+    x_input = np.expand_dims(x_input, axis=0)  # Reshape for the model input: (1, sequence_length, INPUT_SIZE)
     x_input = torch.tensor(x_input, dtype=torch.float32)
 
-    # Convert last close price to a float instead of a numpy array for compatibility with format strings
-    last_close_price = float(data['Close'].values[-1])
+    return x_input, scaler, float(data['Close'].values[-1])  # Ensure last close price is a scalar
 
-    return x_input, scaler, last_close_price
-
-def calculate_rsi(prices, period=14):
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
-    exp1 = prices.ewm(span=fast_period, adjust=False).mean()
-    exp2 = prices.ewm(span=slow_period, adjust=False).mean()
-    macd = exp1 - exp2
-    signal_line = macd.ewm(span=signal_period, adjust=False).mean()
-    return macd, signal_line
-
-def calculate_bollinger_bands(prices, window=20, num_std=2):
-    rolling_mean = prices.rolling(window=window).mean()
-    rolling_std = prices.rolling(window=window).std()
-    upper_band = rolling_mean + (rolling_std * num_std)
-    lower_band = rolling_mean - (rolling_std * num_std)
-    return upper_band, lower_band
-
+# Predict if the stock trend is bullish or bearish
 def predict_trend(model, x_input, scaler, last_close_price):
+    # Make prediction
     with torch.no_grad():
         predicted_price_scaled = model(x_input).item()
-    predicted_price = scaler.inverse_transform(np.array([[predicted_price_scaled, 0, 0, 0, 0, 0, 0, 0]]))[0, 0]
+    
+    # Inverse transform to get the actual predicted price
+    predicted_price = scaler.inverse_transform(
+        np.array([[predicted_price_scaled, 0, 0]])  # Shape for inverse transform
+    )[0, 0]
+
+    # Determine trend
     trend = "Bullish" if predicted_price > last_close_price else "Bearish"
     return predicted_price, trend
 
+# Main function to run the prediction
 def main():
     if len(sys.argv) < 2:
         print("Usage: python predict.py <STOCK_TICKER>")
@@ -87,8 +82,9 @@ def main():
     try:
         model = load_model(input_size=INPUT_SIZE)
         x_input, scaler, last_close_price = fetch_data(ticker)
+
         predicted_price, trend = predict_trend(model, x_input, scaler, last_close_price)
-        
+
         print(f"Stock: {ticker}")
         print(f"Last Close Price: {last_close_price:.2f}")
         print(f"Predicted Price: {predicted_price:.2f}")

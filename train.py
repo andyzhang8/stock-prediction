@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from data_loader import StockDataLoader
 from lstm_model import LSTMModel
+import yfinance as yf
 
 # Parameters
 ticker = "AAPL"
@@ -18,123 +19,132 @@ learning_rate = 0.0001
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def train_and_evaluate(data_loader, model, num_epochs):
-    x, y, scaler = data_loader.get_data()
-    
-    train_size = int(len(x) * 0.7)
-    x_train, x_test = x[:train_size], x[train_size:]
-    y_train, y_test = y[:train_size], y[train_size:]
-    
-    x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
-    y_train = torch.tensor(y_train, dtype=torch.float32).to(device)
-    x_test = torch.tensor(x_test, dtype=torch.float32).to(device)
-    y_test = torch.tensor(y_test, dtype=torch.float32).to(device)
-    
-    # Loss, optimizer, and learning rate scheduler
+def fetch_yfinance_data(ticker, sequence_length=250):
+    data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+    # Calculate technical indicators
+    data['MA100'] = data['Close'].rolling(window=100).mean()
+    data['MA200'] = data['Close'].rolling(window=200).mean()
+    data['RSI'] = calculate_rsi(data['Close'])
+    data['MACD'], data['Signal Line'] = calculate_macd(data['Close'])
+    data['Upper Band'], data['Lower Band'] = calculate_bollinger_bands(data['Close'])
+    data.dropna(inplace=True)
+    return data[['Close', 'MA100', 'MA200', 'RSI', 'MACD', 'Signal Line', 'Upper Band', 'Lower Band']]
+
+def calculate_rsi(prices, period=14):
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
+    exp1 = prices.ewm(span=fast_period, adjust=False).mean()
+    exp2 = prices.ewm(span=slow_period, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal_period, adjust=False).mean()
+    return macd, signal_line
+
+def calculate_bollinger_bands(prices, window=20, num_std=2):
+    rolling_mean = prices.rolling(window=window).mean()
+    rolling_std = prices.rolling(window=window).std()
+    upper_band = rolling_mean + (rolling_std * num_std)
+    lower_band = rolling_mean - (rolling_std * num_std)
+    return upper_band, lower_band
+
+# Combined training on both datasets without resetting weights
+def train_on_combined_data(model, datasets, num_epochs, batch_size):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
-    
-    # Early stopping parameters
-    early_stop_patience = 50 
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+
+    early_stop_patience = 100
     best_val_loss = float("inf")
     patience_counter = 0
-    min_delta = 1e-4  # Minimum improvement threshold for early stopping
+    min_delta = 1e-4
 
     for epoch in range(num_epochs):
         model.train()
-        permutation = torch.randperm(x_train.size(0))
-        epoch_loss = 0
+        total_epoch_loss = 0
+        total_batches = 0
 
-        for i in range(0, x_train.size(0), batch_size):
-            indices = permutation[i:i + batch_size]
-            batch_x, batch_y = x_train[indices], y_train[indices]
-            
-            optimizer.zero_grad()
-            outputs = model(batch_x)
-            
-            # Ensure batch_y has the same shape as outputs for loss calculation
-            loss = criterion(outputs.squeeze(), batch_y.unsqueeze(-1).squeeze())
-            loss.backward()
-            optimizer.step()
+        # Train on both datasets without resetting weights
+        for x, y, scaler in datasets:
+            # Convert numpy arrays to PyTorch tensors and move to device
+            x_train, x_test = x[:int(0.7 * len(x))], x[int(0.7 * len(x)):]
+            y_train, y_test = y[:int(0.7 * len(y))], y[int(0.7 * len(y)):]
 
-            epoch_loss += loss.item()
+            x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
+            y_train = torch.tensor(y_train, dtype=torch.float32).to(device)
+            x_test = torch.tensor(x_test, dtype=torch.float32).to(device)
+            y_test = torch.tensor(y_test, dtype=torch.float32).to(device)
 
-        avg_epoch_loss = epoch_loss / (x_train.size(0) // batch_size)
+            permutation = torch.randperm(x_train.size(0))
+            epoch_loss = 0
 
-        # Validation loss
+            for i in range(0, x_train.size(0), batch_size):
+                indices = permutation[i:i + batch_size]
+                batch_x, batch_y = x_train[indices], y_train[indices]
+
+                optimizer.zero_grad()
+                outputs = model(batch_x)
+                loss = criterion(outputs.squeeze(), batch_y)
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                total_batches += 1
+
+            total_epoch_loss += epoch_loss
+
+        avg_epoch_loss = total_epoch_loss / total_batches
+
+        # Validation on the last dataset's test set
         model.eval()
         with torch.no_grad():
             val_outputs = model(x_test)
-            val_loss = criterion(val_outputs.squeeze(), y_test.unsqueeze(-1).squeeze()).item()
+            val_loss = criterion(val_outputs.squeeze(), y_test).item()
 
         scheduler.step(val_loss)
 
-        # Log training and validation loss every 10 epochs
         if (epoch + 1) % 10 == 0:
             print(f'Epoch [{epoch + 1}/{num_epochs}], Training Loss: {avg_epoch_loss:.4f}, Validation Loss: {val_loss:.4f}')
 
-        # Early stopping check
         if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(model.state_dict(), "temp_best_model.pth")  # Save the best model during training
+            torch.save(model.state_dict(), "temp_best_model.pth")
         else:
             patience_counter += 1
             if patience_counter >= early_stop_patience:
                 print("Early stopping triggered")
                 break
 
-    # Load the best model for evaluation
+    # Load the best model from the combined training
     model.load_state_dict(torch.load("temp_best_model.pth"))
-    model.eval()
-    with torch.no_grad():
-        predicted = model(x_test).squeeze().cpu().numpy()
-        actual = y_test.cpu().numpy()
 
-    # Inverse transform to get actual prices
-    predicted_prices = scaler.inverse_transform(
-        np.concatenate((predicted.reshape(-1, 1), np.zeros((len(predicted), 7))), axis=1)
-    )[:, 0]
-    actual_prices = scaler.inverse_transform(
-        np.concatenate((actual.reshape(-1, 1), np.zeros((len(actual), 7))), axis=1)
-    )[:, 0]
-
-    # Calculate evaluation metrics
-    mse = mean_squared_error(actual_prices, predicted_prices)
-    mae = mean_absolute_error(actual_prices, predicted_prices)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(actual_prices, predicted_prices)
-
-    print(f"\nEvaluation Metrics:")
-    print(f"Mean Squared Error (MSE): {mse:.4f}")
-    print(f"Mean Absolute Error (MAE): {mae:.4f}")
-    print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
-    print(f"R-squared (R²): {r2:.4f}")
-
-    # Plot
-    plt.figure(figsize=(12, 6))
-    plt.plot(actual_prices, label='Actual Price')
-    plt.plot(predicted_prices, label='Predicted Price')
-    plt.title(f"Actual vs Predicted Stock Price for {data_loader.ticker}")
-    plt.xlabel("Time")
-    plt.ylabel("Price")
-    plt.legend()
-    plt.grid()
-    plt.savefig(f"prediction_plot_{data_loader.ticker}.png")
-    plt.show()
-
-
-input_size = 8  # 'Close', 'MA100', 'MA200', 'RSI', 'MACD', 'Signal Line', 'Upper Band', 'Lower Band'
+# Main script
+input_size = 8  # Adjusted to include all indicators
 model = LSTMModel(input_size=input_size, hidden_size=200, num_layers=5, dropout=0.2).to(device)
 
-print("Training on yfinance data...")
-data_loader_yfinance = StockDataLoader(ticker=ticker, sequence_length=sequence_length, use_yfinance=True, start_date=start_date, end_date=end_date)
-train_and_evaluate(data_loader_yfinance, model, num_epochs)
+print("Preparing datasets for combined training...")
 
-print("Training on local dataset...")
-data_loader_local = StockDataLoader(ticker=ticker, sequence_length=sequence_length, data_dir="dataset", use_yfinance=False)
-train_and_evaluate(data_loader_local, model, num_epochs)
+# Load yfinance data
+data_loader_yfinance = StockDataLoader(ticker=ticker, sequence_length=sequence_length, data_dir="dataset")
+x_yfinance, y_yfinance, scaler_yfinance = data_loader_yfinance.get_data()
 
+# Load local data
+data_loader_local = StockDataLoader(ticker=ticker, sequence_length=sequence_length, data_dir="dataset")
+x_local, y_local, scaler_local = data_loader_local.get_data()
+
+# Combine both datasets
+datasets = [
+    (x_yfinance, y_yfinance, scaler_yfinance),
+    (x_local, y_local, scaler_local)
+]
+
+# Train on the combined datasets
+train_on_combined_data(model, datasets, num_epochs, batch_size)
+
+# Save the final model after combined training
 torch.save(model.state_dict(), "final_lstm_stock_prediction_model.pth")
 print("Final model saved as 'final_lstm_stock_prediction_model.pth'")

@@ -13,7 +13,7 @@ class StockDataLoader:
     def load_data(self):
         file_path_stocks = os.path.join(self.data_dir, 'stocks', f"{self.ticker}.csv")
         file_path_etfs = os.path.join(self.data_dir, 'etfs', f"{self.ticker}.csv")
-
+        
         if os.path.exists(file_path_stocks):
             file_path = file_path_stocks
         elif os.path.exists(file_path_etfs):
@@ -58,15 +58,16 @@ class StockDataLoader:
         return upper_band, lower_band
 
     def preprocess_data(self, data):
+        # Scale the data
         data_scaled = self.scaler.fit_transform(data)
+        
         x, y = [], []
         for i in range(self.sequence_length, len(data_scaled)):
             x.append(data_scaled[i - self.sequence_length:i])
             y.append(data_scaled[i, 0])  # Predicting the close price
         x, y = np.array(x), np.array(y)
-        return x, y
+        return x, y, self.scaler  # Now also returning scaler
 
     def get_data(self):
         data = self.load_data()
-        x, y = self.preprocess_data(data)
-        return x, y, self.scaler
+        return self.preprocess_data(data)  # This will return x, y, and scaler
