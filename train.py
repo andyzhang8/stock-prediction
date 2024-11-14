@@ -1,78 +1,97 @@
+# train.py
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from tensorflow.keras.callbacks import EarlyStopping
 
 from data_loader import StockDataLoader
 from lstm_model import LSTMModel
 
-# Hyperparameters
+# Parameters
 ticker = "AAPL"
 sequence_length = 100
 start_date = "2010-01-01"
 end_date = None
-epochs = 100
+num_epochs = 100
 batch_size = 32
 learning_rate = 0.001
 
+# Device configuration
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Load and prepare data
 data_loader = StockDataLoader(ticker, start_date, end_date, sequence_length)
 x, y, scaler = data_loader.get_data()
 
-# Split data
 train_size = int(len(x) * 0.7)
 x_train, x_test = x[:train_size], x[train_size:]
 y_train, y_test = y[:train_size], y[train_size:]
 
-# Initialize and compile model
-input_shape = (x_train.shape[1], x_train.shape[2])
-model_instance = LSTMModel(input_shape)
-model = model_instance.get_model()
-model_instance.compile_model(learning_rate=learning_rate)
+x_train, y_train = x_train.to(device), y_train.to(device)
+x_test, y_test = x_test.to(device), y_test.to(device)
 
-# Early stopping
-early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+input_size = x_train.shape[2]
+model = LSTMModel(input_size=input_size, hidden_size=50, num_layers=4, dropout=0.2).to(device)
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-history = model.fit(x_train, y_train, validation_data=(x_test, y_test), epochs=epochs,
-                    batch_size=batch_size, callbacks=[early_stop])
+# Training loop
+for epoch in range(num_epochs):
+    model.train()
+    optimizer.zero_grad()
 
-y_pred = model.predict(x_test)
-y_test_rescaled = scaler.inverse_transform(np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 2))], axis=1))[:, 0]
-y_pred_rescaled = scaler.inverse_transform(np.concatenate([y_pred, np.zeros((len(y_pred), 2))], axis=1))[:, 0]
+    # Forward pass and loss calculation
+    outputs = model(x_train)
+    loss = criterion(outputs.squeeze(), y_train)
+    loss.backward()
+    optimizer.step()
 
-mse = mean_squared_error(y_test_rescaled, y_pred_rescaled)
-mae = mean_absolute_error(y_test_rescaled, y_pred_rescaled)
+    # Validation loss
+    model.eval()
+    with torch.no_grad():
+        val_outputs = model(x_test)
+        val_loss = criterion(val_outputs.squeeze(), y_test)
+    
+    # Log training and validation loss every 10 epochs
+    if (epoch + 1) % 10 == 0:
+        print(f'Epoch [{epoch + 1}/{num_epochs}], Training Loss: {loss.item():.4f}, Validation Loss: {val_loss.item():.4f}')
+
+model.eval()
+with torch.no_grad():
+    predicted = model(x_test).squeeze().cpu().numpy()
+    actual = y_test.cpu().numpy()
+
+predicted_prices = scaler.inverse_transform(
+    np.concatenate((predicted.reshape(-1, 1), np.zeros((len(predicted), 2))), axis=1)
+)[:, 0]
+actual_prices = scaler.inverse_transform(
+    np.concatenate((actual.reshape(-1, 1), np.zeros((len(actual), 2))), axis=1)
+)[:, 0]
+
+mse = mean_squared_error(actual_prices, predicted_prices)
+mae = mean_absolute_error(actual_prices, predicted_prices)
 rmse = np.sqrt(mse)
-r2 = r2_score(y_test_rescaled, y_pred_rescaled)
+r2 = r2_score(actual_prices, predicted_prices)
 
-print(f"Mean Squared Error (MSE): {mse}")
-print(f"Mean Absolute Error (MAE): {mae}")
-print(f"Root Mean Squared Error (RMSE): {rmse}")
-print(f"R-squared: {r2}")
+print(f"\nEvaluation Metrics:")
+print(f"Mean Squared Error (MSE): {mse:.4f}")
+print(f"Mean Absolute Error (MAE): {mae:.4f}")
+print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+print(f"R-squared (R²): {r2:.4f}")
 
-# Plot actual vs predicted stock prices
+# Plot the results
 plt.figure(figsize=(12, 6))
-plt.plot(y_test_rescaled, label="Actual Price", color="blue")
-plt.plot(y_pred_rescaled, label="Predicted Price", color="red")
+plt.plot(actual_prices, label='Actual Price')
+plt.plot(predicted_prices, label='Predicted Price')
 plt.title(f"Actual vs Predicted Stock Price for {ticker}")
 plt.xlabel("Time")
 plt.ylabel("Price")
 plt.legend()
 plt.grid()
-plt.savefig("prediction_plot.png")
+plt.savefig("prediction_plot_pytorch.png")
 plt.show()
 
-# Moving Average Plot
-plt.figure(figsize=(12, 6))
-plt.plot(scaler.inverse_transform(np.concatenate([y_test.reshape(-1, 1), np.zeros((len(y_test), 2))], axis=1))[:, 0], label="Close Price")
-plt.plot(scaler.inverse_transform(np.concatenate([x_test[:, -1, 1].reshape(-1, 1), np.zeros((len(y_test), 2))], axis=1))[:, 0], label="100-Day MA", color="orange")
-plt.plot(scaler.inverse_transform(np.concatenate([x_test[:, -1, 2].reshape(-1, 1), np.zeros((len(y_test), 2))], axis=1))[:, 0], label="200-Day MA", color="green")
-plt.title(f"Stock Price and Moving Averages for {ticker}")
-plt.xlabel("Time")
-plt.ylabel("Price")
-plt.legend()
-plt.grid()
-plt.savefig("moving_average_plot.png")
-plt.show()
-
-model.save("lstm_stock_prediction_model.h5")
-
+torch.save(model.state_dict(), 'lstm_stock_prediction_model.pth')

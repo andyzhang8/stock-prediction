@@ -1,25 +1,34 @@
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+import torch
+import torch.nn as nn
 
-class LSTMModel:
-    def __init__(self, input_shape):
-        self.model = Sequential()
-        self.model.add(LSTM(units=50, activation='relu', return_sequences=True, input_shape=input_shape))
-        self.model.add(Dropout(0.2))
-        self.model.add(LSTM(units=60, activation='relu', return_sequences=True))
-        self.model.add(Dropout(0.3))
-        self.model.add(LSTM(units=80, activation='relu', return_sequences=True))
-        self.model.add(Dropout(0.4))
-        self.model.add(LSTM(units=120, activation='relu'))
-        self.model.add(Dropout(0.5))
-        self.model.add(Dense(units=1))  # Output layer for regression
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size=50, num_layers=4, dropout=0.2):
+        super(LSTMModel, self).__init__()
 
-    def compile_model(self, learning_rate=0.001):
-        # Compile with Adam optimizer
-        from tensorflow.keras.optimizers import Adam
-        optimizer = Adam(learning_rate=learning_rate)
-        self.model.compile(optimizer=optimizer, loss='mean_squared_error', metrics=['mae'])
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
 
-    def get_model(self):
-        return self.model
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Additional dropout after each LSTM layer for regularization
+        self.dropout = nn.Dropout(dropout)
+        
+        # Fully connected output layer
+        self.fc = nn.Linear(hidden_size, 1)
 
+    def forward(self, x):
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+
+        # Forward propagate LSTM
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.dropout(out)  # Apply dropout
+
+        out = self.fc(out[:, -1, :])
+        return out
