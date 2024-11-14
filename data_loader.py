@@ -1,23 +1,48 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+import os
 import yfinance as yf
+from sklearn.preprocessing import MinMaxScaler
 
 class StockDataLoader:
-    def __init__(self, ticker, start_date="2010-01-01", end_date=None, sequence_length=100):
+    def __init__(self, ticker, sequence_length=100, data_dir="dataset", use_yfinance=False, start_date="2010-01-01", end_date=None):
         self.ticker = ticker
+        self.sequence_length = sequence_length
+        self.data_dir = data_dir  # Directory containing the local dataset
+        self.use_yfinance = use_yfinance  # Determine whether to use yfinance
         self.start_date = start_date
         self.end_date = end_date
-        self.sequence_length = sequence_length
         self.scaler = MinMaxScaler(feature_range=(0, 1))
 
     def load_data(self):
-        # Stock data from Yahoo Finance
-        data = yf.download(self.ticker, self.start_date, self.end_date)
-        # Moving averages
-        data['MA100'] = data['Close'].rolling(window=100).mean()
-        data['MA200'] = data['Close'].rolling(window=200).mean()
+        if self.use_yfinance:
+            # Download data from yfinance
+            data = yf.download(self.ticker, start=self.start_date, end=self.end_date)
+        else:
+            # Define the path to look for the stock data in the stocks or ETFs folder
+            file_path_stocks = os.path.join(self.data_dir, 'stocks', f"{self.ticker}.csv")
+            file_path_etfs = os.path.join(self.data_dir, 'etfs', f"{self.ticker}.csv")
+            
+            # Check if file exists in stocks or ETFs folder
+            if os.path.exists(file_path_stocks):
+                file_path = file_path_stocks
+            elif os.path.exists(file_path_etfs):
+                file_path = file_path_etfs
+            else:
+                raise FileNotFoundError(f"No data found for ticker {self.ticker}")
+
+            # Load the CSV file and ensure columns are interpreted as floats
+            data = pd.read_csv(file_path, dtype={
+                "Open": float, "High": float, "Low": float, 
+                "Close": float, "Adj Close": float, "Volume": float
+            })
+
+        # Verify that the required columns exist and are float types
+        required_columns = ["Close"]
+        for col in ["MA100", "MA200"]:
+            data[col] = data['Close'].rolling(window=int(col[2:])).mean()  # Moving averages
         data.dropna(inplace=True)  # Drop rows with NaN values
+
         return data[['Close', 'MA100', 'MA200']]
 
     def preprocess_data(self, data):
@@ -36,4 +61,3 @@ class StockDataLoader:
         data = self.load_data()
         x, y = self.preprocess_data(data)
         return x, y, self.scaler
-
