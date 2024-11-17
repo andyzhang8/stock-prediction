@@ -7,7 +7,7 @@ import sys
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from lstm_model import LSTMModel
 
-MODEL_PATH = "final_lstm_stock_prediction_model.pth"
+MODEL_PATH = "temp_best_model.pth"
 SEQUENCE_LENGTH = 250
 INPUT_SIZE = 19
 
